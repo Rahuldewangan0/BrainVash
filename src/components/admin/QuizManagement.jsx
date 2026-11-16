@@ -245,8 +245,19 @@ export default function QuizManagement() {
   // Save Quiz (Create or Update)
   const handleSaveQuiz = async (e) => {
     e.preventDefault()
+
+    if (!supabase) {
+      setError('Supabase is not configured. Check your .env.local settings.')
+      return
+    }
+
     if (!formData.title.trim()) {
       setError('Quiz title is required.')
+      return
+    }
+
+    if (!formData.subject_id) {
+      setError('Please select a subject before creating the quiz.')
       return
     }
 
@@ -255,102 +266,87 @@ export default function QuizManagement() {
     setSuccessMsg('')
 
     try {
-      const generatedSlug = formData.slug.trim() || `${slugify(formData.title)}-${Date.now().toString().slice(-4)}`
+      const generatedSlug =
+        formData.slug.trim() ||
+        `${slugify(formData.title)}-${Date.now().toString().slice(-4)}`
 
       const payload = {
         title: formData.title.trim(),
         slug: generatedSlug,
         description: formData.description.trim() || null,
-        subject_id: formData.subject_id || null,
-        semester: Number(formData.semester) || 1,
-        branch: formData.branch,
+        subject_id: formData.subject_id,
+        semester: Number(formData.semester),
+        branch: formData.branch.trim() || null,
         difficulty: formData.difficulty,
-        time_limit_minutes: Number(formData.time_limit_minutes) || 15,
-        total_questions: Number(formData.total_questions) || 10,
-        total_marks: Number(formData.total_marks) || 10,
-        passing_score: Number(formData.passing_score) || 60,
-        negative_marks: Number(formData.negative_marks) || 0.0,
-        max_attempts: Number(formData.max_attempts) || 1,
-        is_published: formData.is_published,
-        is_daily_challenge: formData.is_daily_challenge,
+        time_limit_minutes: Number(formData.time_limit_minutes),
+        total_questions: Number(formData.total_questions),
+        total_marks: Number(formData.total_marks),
+        passing_score: Number(formData.passing_score),
+        negative_marks: Number(formData.negative_marks),
+        max_attempts: Number(formData.max_attempts),
+        is_published: Boolean(formData.is_published),
+        is_daily_challenge: Boolean(formData.is_daily_challenge),
+      }
+
+      // Confirm there is an authenticated user before writing.
+      const { data: authData, error: authError } = await supabase.auth.getUser()
+      if (authError) throw authError
+      if (!authData?.user) {
+        throw new Error('Your session has expired. Please sign in again and retry.')
       }
 
       if (editingQuiz) {
-        // UPDATE (try full payload first)
-        let { error: updErr } = await supabase
+        // Update and return the saved row. A zero-row update is treated as a failure.
+        const { data: updatedQuiz, error: updateError } = await supabase
           .from('quizzes')
           .update(payload)
           .eq('id', editingQuiz.id)
+          .select('*')
+          .single()
 
-        if (updErr && (updErr.message.includes('column') || updErr.message.includes('does not exist'))) {
-          // Fallback with base columns only
-          const basePayload = {
-            title: payload.title,
-            slug: payload.slug,
-            description: payload.description,
-            subject_id: payload.subject_id,
-            difficulty: payload.difficulty,
-            time_limit_minutes: payload.time_limit_minutes,
-            total_questions: payload.total_questions,
-            passing_score: payload.passing_score,
-            is_published: payload.is_published,
-            is_daily_challenge: payload.is_daily_challenge,
-          }
-          const resBase = await supabase
-            .from('quizzes')
-            .update(basePayload)
-            .eq('id', editingQuiz.id)
-
-          updErr = resBase.error
+        if (updateError) throw updateError
+        if (!updatedQuiz?.id) {
+          throw new Error('Supabase did not confirm that the quiz was updated.')
         }
 
-        if (updErr) {
-          if (updErr.message.includes('permission denied')) {
-            throw new Error(`Database Permission Notice: The 'authenticated' role currently lacks table-level UPDATE grants on quizzes. Deploying the Phase 2 migration will grant full admin permissions.`)
-          }
-          throw new Error(updErr.message)
-        }
-        setSuccessMsg(`Quiz "${payload.title}" updated successfully.`)
+        setSuccessMsg(`Quiz "${updatedQuiz.title}" updated successfully.`)
       } else {
-        // CREATE (try full payload first)
-        let { error: insErr } = await supabase
+        // Insert and return the actual database row. No reduced-payload fallback:
+        // schema, permission, validation and duplicate-slug errors must be visible.
+        const { data: insertedQuiz, error: insertError } = await supabase
           .from('quizzes')
-          .insert([payload])
+          .insert(payload)
+          .select('*')
+          .single()
 
-        if (insErr && (insErr.message.includes('column') || insErr.message.includes('does not exist'))) {
-          // Fallback with base columns only
-          const basePayload = {
-            title: payload.title,
-            slug: payload.slug,
-            description: payload.description,
-            subject_id: payload.subject_id,
-            difficulty: payload.difficulty,
-            time_limit_minutes: payload.time_limit_minutes,
-            total_questions: payload.total_questions,
-            passing_score: payload.passing_score,
-            is_published: payload.is_published,
-            is_daily_challenge: payload.is_daily_challenge,
-          }
-          const resBase = await supabase
-            .from('quizzes')
-            .insert([basePayload])
-
-          insErr = resBase.error
+        if (insertError) throw insertError
+        if (!insertedQuiz?.id) {
+          throw new Error('Supabase did not return a saved quiz record. The quiz was not confirmed as created.')
         }
 
-        if (insErr) {
-          if (insErr.message.includes('permission denied')) {
-            throw new Error(`Database Permission Notice: The 'authenticated' role currently lacks table-level INSERT grants on quizzes. Deploying the Phase 2 migration will grant full admin permissions.`)
-          }
-          throw new Error(insErr.message)
-        }
-        setSuccessMsg(`Quiz "${payload.title}" created successfully.`)
+        // Add the confirmed record immediately; the refresh below reloads its subject relation.
+        const selectedSubject = subjects.find(
+          (subject) => subject.id === insertedQuiz.subject_id
+        )
+        setQuizzes((current) => [
+          { ...insertedQuiz, subjects: selectedSubject || null },
+          ...current.filter((quiz) => quiz.id !== insertedQuiz.id),
+        ])
+        setSuccessMsg(`Quiz "${insertedQuiz.title}" created and saved successfully.`)
       }
 
+      // Close only after Supabase returns the saved row without an error.
       setIsFormModalOpen(false)
-      setRefreshTrigger((prev) => prev + 1)
+      setRefreshTrigger((previous) => previous + 1)
     } catch (err) {
-      setError(err.message || 'Failed to save quiz.')
+      const details = [
+        err?.message || 'Unknown database error',
+        err?.code ? `Code: ${err.code}` : null,
+        err?.details ? `Details: ${err.details}` : null,
+        err?.hint ? `Hint: ${err.hint}` : null,
+      ].filter(Boolean).join(' | ')
+
+      setError(`Failed to save quiz: ${details}`)
     } finally {
       setSaving(false)
     }
@@ -615,8 +611,9 @@ export default function QuizManagement() {
       })
 
       if (rpcErr) {
-        // Fallback: direct insert into quiz_questions or update questions.quiz_id
-        const { error: insErr } = await supabase
+        // Phase 1 compatibility: questions are linked directly through questions.quiz_id.
+        // Phase 2 compatibility: use the quiz_questions junction table when available.
+        const { error: junctionErr } = await supabase
           .from('quiz_questions')
           .insert({
             quiz_id: activeQuizForQuestions.id,
@@ -624,16 +621,21 @@ export default function QuizManagement() {
             order_index: assignedQuestions.length,
           })
 
-        if (insErr) {
-          // If junction table is not yet migrated, fallback to questions.quiz_id
-          await supabase
+        if (junctionErr) {
+          const { error: directErr } = await supabase
             .from('questions')
             .update({ quiz_id: activeQuizForQuestions.id })
             .eq('id', questionId)
+
+          if (directErr) {
+            throw new Error(
+              `Assignment RPC failed (${rpcErr.message}); junction insert failed (${junctionErr.message}); direct assignment failed (${directErr.message}).`
+            )
+          }
         }
       }
 
-      // Refresh drawer questions
+      // Refresh drawer questions and surface refresh failures instead of silently succeeding.
       await handleOpenQuestionsDrawer(activeQuizForQuestions)
     } catch (err) {
       setError(`Failed to assign question: ${err.message}`)
@@ -661,19 +663,25 @@ export default function QuizManagement() {
       })
 
       if (rpcErr) {
-        // Fallback: direct delete from quiz_questions junction
-        await supabase
+        // Check both Phase 2 junction-table and Phase 1 direct-link cleanup operations.
+        const { error: junctionErr } = await supabase
           .from('quiz_questions')
           .delete()
           .eq('quiz_id', activeQuizForQuestions.id)
           .eq('question_id', questionId)
 
-        // Also unlink if questions.quiz_id matches
-        await supabase
+        const { error: directErr } = await supabase
           .from('questions')
           .update({ quiz_id: null })
           .eq('id', questionId)
           .eq('quiz_id', activeQuizForQuestions.id)
+
+        const junctionMissing = junctionErr && /does not exist|schema cache|relation/i.test(junctionErr.message)
+        if (directErr || (junctionErr && !junctionMissing)) {
+          throw new Error(
+            `Removal RPC failed (${rpcErr.message}); ${junctionErr ? `junction removal failed (${junctionErr.message})` : 'junction removal succeeded'}; ${directErr ? `direct unlink failed (${directErr.message})` : 'direct unlink succeeded'}.`
+          )
+        }
       }
 
       // Refresh drawer questions

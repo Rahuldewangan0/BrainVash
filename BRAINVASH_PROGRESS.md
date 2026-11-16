@@ -57,6 +57,15 @@ BrainVash is an online quiz, assessment, and performance analysis platform engin
   - 3-tier difficulty categorization (Easy, Medium, Hard).
   - Reusable question linking to quizzes via `quiz_questions` junction table.
   - Atomic question and answer key creation/update via `admin_save_question` RPC with direct table fallback.
+  - **Bulk CSV Import System**:
+    - "Import Questions (CSV)" button with modal interface.
+    - Full client-side CSV parsing supporting all 11 required columns (`question_text`, `option_a`, `option_b`, `option_c`, `option_d`, `correct_option_index`, `explanation`, `marks`, `difficulty`, `topic`, `subject_name`).
+    - Subject dropdown mapping with auto-resolution by subject name/code and fallback support.
+    - Optional quiz assignment or standalone question-bank save (`quiz_id = null`).
+    - Pre-import validation engine: missing fields, option count, `correct_option_index` (0-3 or A-D), difficulty (`easy`, `medium`, `hard`), and marks.
+    - Duplicate detection (both intra-file and against existing Question Bank items) with skip toggle.
+    - Live CSV preview table with row status, error tabs, and downloadable sample CSV template.
+    - Sequential import via `admin_save_question` RPC with progress bar, success/failure tally, and exact row error reporting. Zero direct table inserts into `question_answer_keys`.
 - [x] **Student Roster & Logs (`src/components/admin/StudentManagement.jsx`)**:
   - Overview of all student profiles, college representation, branch, semester, lifetime scores, and attempt counts.
   - Search by name, college, or branch with sorting options.
@@ -66,8 +75,19 @@ BrainVash is an online quiz, assessment, and performance analysis platform engin
 ## 3. Database Migration Architecture
 
 ### Staged Migration File: `supabase/migrations/20261116_phase2_admin_and_difficulty.sql`
-- **Deployment Status**: 🚀 **READY FOR DEPLOYMENT** (Zero syntax errors, full transactional wrapping, RLS hardened, zero remote modifications pending approval)
-- **Rollback File**: `supabase/migrations/20261116_phase2_rollback.sql` (Non-destructive timestamped archive snapshots, INTEGER column types restoration, question preservation, exact Phase 1 RLS restoration, exact Phase 1 grading trigger restoration with `pg_trigger_depth()` guard — no `brainvash.grading_in_progress` residue)
+- **Deployment Status**: 🚀 **READY FOR DEPLOYMENT** (Zero syntax errors, full transactional wrapping, RLS hardened, NULL-safe comparisons, zero remote modifications pending approval)
+- **Rollback File**: `supabase/migrations/20261116_phase2_rollback.sql` (Non-destructive timestamped archive snapshots, INTEGER column types restoration, question preservation, exact Phase 1 RLS restoration, trigger-safe data normalization without top-level PERFORM)
+- **Grading & Scoring Security**: Unforgeable dual-factor verification (`is_trusted_grading_context` inspecting engine call stack `PG_CONTEXT` + dynamic transaction nonce) across both `quiz_attempts` and `profiles` score accumulation triggers, blocking all direct REST score/privilege tampering while permitting legitimate quiz grading.
+- **Defense in Depth**: Direct table privileges on `question_answer_keys` revoked from `authenticated` and `anon`; authoring strictly mediated via `admin_save_question()` RPC.
+- **Question Bank Mapping**: Intelligent unlinking in `admin_remove_question_from_quiz()` automatically unlinks direct-only questions from `questions.quiz_id` while preserving dual-origin and manual-only Question Bank assignments.
+- **NULL Safety**: All trigger guard comparisons use `IS DISTINCT FROM` instead of `!=` to prevent NULL-bypass attacks across both migration and rollback.
+- **Pre-Deployment Audit**: 5 findings resolved (Critical profile score trigger, High rollback deadlock, Medium direct unlinking, Low answer-key table grant, Critical top-level PERFORM syntax error). Phase 1 deployed baseline left pristine.
+
+### Exact Deployment Steps (When Approved):
+1. **Apply Phase 2 Migration**: In Supabase Dashboard > SQL Editor, run `supabase/migrations/20261116_phase2_admin_and_difficulty.sql`.
+2. **Verify Schema**: Confirm `quiz_questions` junction table, difficulty columns, and `is_trusted_grading_context` function exist.
+3. **Seed Controlled QA Dataset**: Insert the 10 verified C++ questions into the database.
+4. **Execute End-to-End Tests**: Run Feature 2 & 3 student quiz runner, negative marking, and server-side grading tests.
 
 ### Key Database Changes:
 1. **Schema Enhancements**:

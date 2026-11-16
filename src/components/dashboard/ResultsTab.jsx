@@ -1,23 +1,69 @@
-import { useState, useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
 export default function ResultsTab({
-  attempts,
+  attempts = [],
   onViewResult,
   onNavigateTab,
 }) {
   const [statusFilter, setStatusFilter] = useState('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sortBy, setSortBy] = useState('newest')
+
+  const counts = useMemo(
+    () => ({
+      all: attempts.length,
+      completed: attempts.filter((attempt) => attempt.status === 'completed').length,
+      abandoned: attempts.filter((attempt) => attempt.status === 'abandoned').length,
+    }),
+    [attempts]
+  )
 
   const filteredAttempts = useMemo(() => {
-    if (statusFilter === 'all') return attempts
-    return attempts.filter((a) => a.status === statusFilter)
-  }, [attempts, statusFilter])
+    const query = searchQuery.trim().toLowerCase()
+
+    const filtered = attempts.filter((attempt) => {
+      const matchesStatus =
+        statusFilter === 'all' || attempt.status === statusFilter
+
+      const quizTitle = attempt.quizzes?.title || 'Quiz Attempt'
+      const subjectName = attempt.quizzes?.subjects?.name || 'General'
+      const matchesSearch =
+        !query ||
+        quizTitle.toLowerCase().includes(query) ||
+        subjectName.toLowerCase().includes(query)
+
+      return matchesStatus && matchesSearch
+    })
+
+    return [...filtered].sort((a, b) => {
+      const dateA = new Date(a.completed_at || a.started_at || 0).getTime()
+      const dateB = new Date(b.completed_at || b.started_at || 0).getTime()
+      const scoreA = Number(a.score || 0)
+      const scoreB = Number(b.score || 0)
+      const accuracyA = Number(a.accuracy_percentage || 0)
+      const accuracyB = Number(b.accuracy_percentage || 0)
+
+      switch (sortBy) {
+        case 'oldest':
+          return dateA - dateB
+        case 'highest':
+          return accuracyB - accuracyA || scoreB - scoreA
+        case 'lowest':
+          return accuracyA - accuracyB || scoreA - scoreB
+        case 'newest':
+        default:
+          return dateB - dateA
+      }
+    })
+  }, [attempts, statusFilter, searchQuery, sortBy])
 
   const formatDate = (isoString) => {
     if (!isoString) return '—'
-    const d = new Date(isoString)
-    return d.toLocaleString('en-US', {
-      month: 'short',
+    const date = new Date(isoString)
+    if (Number.isNaN(date.getTime())) return '—'
+    return date.toLocaleString('en-IN', {
       day: 'numeric',
+      month: 'short',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
@@ -25,11 +71,18 @@ export default function ResultsTab({
   }
 
   const formatTime = (seconds) => {
-    if (!seconds || seconds <= 0) return '0s'
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    if (mins === 0) return `${secs}s`
-    return `${mins}m ${secs}s`
+    const value = Number(seconds || 0)
+    if (value <= 0) return '0s'
+    const minutes = Math.floor(value / 60)
+    const remainingSeconds = value % 60
+    if (minutes === 0) return `${remainingSeconds}s`
+    return `${minutes}m ${remainingSeconds}s`
+  }
+
+  const statusLabel = (status) => {
+    if (status === 'completed') return 'Completed'
+    if (status === 'abandoned') return 'Timed Out'
+    return 'In Progress'
   }
 
   return (
@@ -43,31 +96,145 @@ export default function ResultsTab({
         </div>
       </div>
 
-      {/* Filter Tabs */}
+      {/* Status filters */}
       <div className="dash-category-tabs">
         <button
           className={`dash-cat-pill ${statusFilter === 'all' ? 'active' : ''}`}
           onClick={() => setStatusFilter('all')}
         >
-          All Attempts ({attempts.length})
+          All Attempts ({counts.all})
         </button>
         <button
           className={`dash-cat-pill ${statusFilter === 'completed' ? 'active' : ''}`}
           onClick={() => setStatusFilter('completed')}
         >
-          Completed ({attempts.filter((a) => a.status === 'completed').length})
+          Completed ({counts.completed})
         </button>
         <button
           className={`dash-cat-pill ${statusFilter === 'abandoned' ? 'active' : ''}`}
           onClick={() => setStatusFilter('abandoned')}
         >
-          Timed Out / Abandoned ({attempts.filter((a) => a.status === 'abandoned').length})
+          Timed Out / Abandoned ({counts.abandoned})
         </button>
       </div>
 
-      {/* Table of Results */}
+      {/* Search and sort controls */}
+      <div
+        className="dash-card"
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          gap: 12,
+          marginBottom: 18,
+          padding: 16,
+        }}
+      >
+        <div style={{ flex: '1 1 240px' }}>
+          <label
+            htmlFor="attempt-search"
+            style={{
+              display: 'block',
+              color: '#6e5a63',
+              fontSize: 12,
+              fontWeight: 600,
+              marginBottom: 6,
+            }}
+          >
+            Search quiz or subject
+          </label>
+          <input
+            id="attempt-search"
+            type="search"
+            value={searchQuery}
+            onChange={(event) => setSearchQuery(event.target.value)}
+            placeholder="e.g. Data Structures, DBMS..."
+            style={{
+              width: '100%',
+              minHeight: 42,
+              border: '1px solid #e8dadd',
+              borderRadius: 9,
+              padding: '9px 12px',
+              background: '#fffdfc',
+              color: '#38232f',
+              outlineColor: '#e8634a',
+            }}
+          />
+        </div>
+
+        <div style={{ flex: '0 1 210px' }}>
+          <label
+            htmlFor="attempt-sort"
+            style={{
+              display: 'block',
+              color: '#6e5a63',
+              fontSize: 12,
+              fontWeight: 600,
+              marginBottom: 6,
+            }}
+          >
+            Sort attempts
+          </label>
+          <select
+            id="attempt-sort"
+            value={sortBy}
+            onChange={(event) => setSortBy(event.target.value)}
+            style={{
+              width: '100%',
+              minHeight: 42,
+              border: '1px solid #e8dadd',
+              borderRadius: 9,
+              padding: '9px 12px',
+              background: '#fffdfc',
+              color: '#38232f',
+            }}
+          >
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="highest">Highest accuracy</option>
+            <option value="lowest">Lowest accuracy</option>
+          </select>
+        </div>
+
+        {(searchQuery || sortBy !== 'newest') && (
+          <button
+            type="button"
+            onClick={() => {
+              setSearchQuery('')
+              setSortBy('newest')
+              setStatusFilter('all')
+            }}
+            style={{
+              alignSelf: 'flex-end',
+              minHeight: 42,
+              border: '1px solid #e8dadd',
+              borderRadius: 9,
+              padding: '9px 13px',
+              background: '#fff',
+              color: '#765d67',
+              cursor: 'pointer',
+            }}
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      {/* Results table */}
       {filteredAttempts.length > 0 ? (
         <div className="dash-card">
+          <div
+            className="dash-card-header"
+            style={{ padding: '16px 18px 8px' }}
+          >
+            <div>
+              <h2 className="dash-card-title">Attempt History</h2>
+              <p className="dash-card-subtitle">
+                Showing {filteredAttempts.length} of {attempts.length} attempts
+              </p>
+            </div>
+          </div>
+
           <div className="dash-table-responsive">
             <table className="dash-table">
               <thead>
@@ -83,52 +250,47 @@ export default function ResultsTab({
                 </tr>
               </thead>
               <tbody>
-                {filteredAttempts.map((att) => (
-                  <tr key={att.id}>
+                {filteredAttempts.map((attempt) => (
+                  <tr key={attempt.id}>
                     <td>
                       <div className="dash-table-quiz-title">
-                        {att.quizzes?.title || 'Quiz Attempt'}
+                        {attempt.quizzes?.title || 'Quiz Attempt'}
                       </div>
                     </td>
                     <td>
                       <span className="dash-table-sub-tag">
-                        {att.quizzes?.subjects?.name || 'General'}
+                        {attempt.quizzes?.subjects?.name || 'General'}
                       </span>
                     </td>
                     <td>
-                      <span className={`dash-status-pill status-${att.status}`}>
-                        {att.status === 'completed'
-                          ? 'Completed'
-                          : att.status === 'abandoned'
-                          ? 'Timed Out'
-                          : 'In Progress'}
+                      <span className={`dash-status-pill status-${attempt.status}`}>
+                        {statusLabel(attempt.status)}
                       </span>
                     </td>
                     <td>
                       <span className="dash-table-score">
-                        {att.score} / {att.total_marks || 0}
+                        {attempt.score ?? 0} / {attempt.total_marks || 0}
                       </span>
                     </td>
                     <td>
                       <span
-                        className={`dash-table-accuracy acc-${
-                          att.accuracy_percentage >= 70
-                            ? 'high'
-                            : att.accuracy_percentage >= 50
+                        className={`dash-table-accuracy acc-${Number(attempt.accuracy_percentage || 0) >= 70
+                          ? 'high'
+                          : Number(attempt.accuracy_percentage || 0) >= 50
                             ? 'med'
                             : 'low'
-                        }`}
+                          }`}
                       >
-                        {att.accuracy_percentage}%
+                        {Number(attempt.accuracy_percentage || 0)}%
                       </span>
                     </td>
-                    <td>{formatTime(att.time_taken_seconds)}</td>
-                    <td>{formatDate(att.completed_at || att.started_at)}</td>
+                    <td>{formatTime(attempt.time_taken_seconds)}</td>
+                    <td>{formatDate(attempt.completed_at || attempt.started_at)}</td>
                     <td>
-                      {att.status === 'completed' ? (
+                      {attempt.status === 'completed' ? (
                         <button
                           className="dash-btn-table-action"
-                          onClick={() => onViewResult(att)}
+                          onClick={() => onViewResult(attempt)}
                           title="View review and explanations"
                         >
                           View Result
@@ -146,18 +308,31 @@ export default function ResultsTab({
       ) : (
         <div className="dash-empty-state">
           <div className="dash-empty-icon">🎯</div>
-          <h3>No quiz results found</h3>
+          <h3>{attempts.length === 0 ? 'No quiz results yet' : 'No matching attempts found'}</h3>
           <p>
-            {statusFilter === 'all'
+            {attempts.length === 0
               ? "You haven't attempted any quizzes yet. Start taking quizzes to see your records here."
-              : `No quiz attempts matching status "${statusFilter}".`}
+              : 'Try another search term or change the status filter to find an attempt.'}
           </p>
-          <button
-            className="btn-primary"
-            onClick={() => onNavigateTab('quizzes')}
-          >
-            Explore Quizzes →
-          </button>
+          {attempts.length === 0 ? (
+            <button
+              className="btn-primary"
+              onClick={() => onNavigateTab('quizzes')}
+            >
+              Explore Quizzes →
+            </button>
+          ) : (
+            <button
+              className="btn-primary"
+              onClick={() => {
+                setSearchQuery('')
+                setStatusFilter('all')
+                setSortBy('newest')
+              }}
+            >
+              Clear Filters
+            </button>
+          )}
         </div>
       )}
     </div>

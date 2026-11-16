@@ -1,6 +1,250 @@
 import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../../lib/supabaseClient'
 
+// RFC 4180 compliant CSV parser that handles quoted strings, escaped quotes, commas, and multi-line fields
+function parseCSV(text) {
+  const rows = []
+  let currentRow = []
+  let currentField = ''
+  let inQuotes = false
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+    const nextChar = text[i + 1]
+
+    if (inQuotes) {
+      if (char === '"' && nextChar === '"') {
+        currentField += '"'
+        i++ // Skip escaped quote
+      } else if (char === '"') {
+        inQuotes = false
+      } else {
+        currentField += char
+      }
+    } else {
+      if (char === '"') {
+        inQuotes = true
+      } else if (char === ',') {
+        currentRow.push(currentField.trim())
+        currentField = ''
+      } else if (char === '\r') {
+        // Skip carriage return
+      } else if (char === '\n') {
+        currentRow.push(currentField.trim())
+        if (currentRow.some((f) => f.length > 0)) {
+          rows.push(currentRow)
+        }
+        currentRow = []
+        currentField = ''
+      } else {
+        currentField += char
+      }
+    }
+  }
+
+  if (currentField.length > 0 || currentRow.length > 0) {
+    currentRow.push(currentField.trim())
+    if (currentRow.some((f) => f.length > 0)) {
+      rows.push(currentRow)
+    }
+  }
+
+  return rows
+}
+
+// Validates and maps raw CSV rows into structured Question Bank objects
+function validateAndParseCsvQuestions(rawText, fallbackSubjectId, subjectsList, existingQuestionsList) {
+  if (!rawText || !rawText.trim()) {
+    return { rows: [], errors: [], validCount: 0, errorCount: 0, duplicateCount: 0 }
+  }
+
+  const rawRows = parseCSV(rawText)
+  if (rawRows.length === 0) {
+    return { rows: [], errors: [{ row: 0, error: 'CSV file is empty.' }], validCount: 0, errorCount: 1, duplicateCount: 0 }
+  }
+
+  // Detect and index header columns
+  const firstRow = rawRows[0].map((h) => h.toLowerCase().trim().replace(/[\s_-]+/g, ''))
+  let headerMap = null
+  let startIndex = 0
+
+  const hasHeader = firstRow.some((col) =>
+    ['questiontext', 'question', 'statement', 'optiona', 'correctoptionindex', 'correctoption', 'answer'].includes(col)
+  )
+
+  if (hasHeader) {
+    headerMap = {}
+    firstRow.forEach((col, idx) => {
+      if (['questiontext', 'question', 'statement'].includes(col)) headerMap.question_text = idx
+      else if (['optiona', 'a'].includes(col)) headerMap.option_a = idx
+      else if (['optionb', 'b'].includes(col)) headerMap.option_b = idx
+      else if (['optionc', 'c'].includes(col)) headerMap.option_c = idx
+      else if (['optiond', 'd'].includes(col)) headerMap.option_d = idx
+      else if (['correctoptionindex', 'correctoption', 'correctindex', 'correctanswer', 'answer', 'correct'].includes(col)) headerMap.correct_option_index = idx
+      else if (['explanation', 'explain', 'solution'].includes(col)) headerMap.explanation = idx
+      else if (['marks', 'mark', 'points'].includes(col)) headerMap.marks = idx
+      else if (['difficulty', 'diff', 'level'].includes(col)) headerMap.difficulty = idx
+      else if (['topic', 'tag', 'topicname'].includes(col)) headerMap.topic = idx
+      else if (['subjectname', 'subject', 'subjectcode'].includes(col)) headerMap.subject_name = idx
+      else if (['codesnippet', 'code', 'snippet'].includes(col)) headerMap.code_snippet = idx
+    })
+    startIndex = 1
+  }
+
+  // Duplicate detection sets
+  const existingSet = new Set(
+    (existingQuestionsList || []).map((q) => (q.question_text || '').toLowerCase().trim())
+  )
+  const seenInCsv = new Set()
+
+  const parsedItems = []
+  const allErrors = []
+  let validCount = 0
+  let errorCount = 0
+  let duplicateCount = 0
+
+  for (let r = startIndex; r < rawRows.length; r++) {
+    const row = rawRows[r]
+    const rowNum = r + 1
+
+    const getVal = (key, fallbackIdx) => {
+      if (headerMap && headerMap[key] !== undefined) {
+        return row[headerMap[key]] !== undefined ? row[headerMap[key]] : ''
+      }
+      return row[fallbackIdx] !== undefined ? row[fallbackIdx] : ''
+    }
+
+    const questionText = getVal('question_text', 0)
+    const optA = getVal('option_a', 1)
+    const optB = getVal('option_b', 2)
+    const optC = getVal('option_c', 3)
+    const optD = getVal('option_d', 4)
+    const rawCorrect = getVal('correct_option_index', 5)
+    const rawExplanation = getVal('explanation', 6)
+    const rawMarks = getVal('marks', 7)
+    const rawDiff = getVal('difficulty', 8)
+    const rawTopic = getVal('topic', 9)
+    const rawSubject = getVal('subject_name', 10)
+    const rawCodeSnippet = getVal('code_snippet', 11)
+
+    const rowErrors = []
+
+    // 1. Validate question_text
+    if (!questionText || questionText.trim().length < 3) {
+      rowErrors.push('Missing or too short question_text (minimum 3 characters required).')
+    }
+
+    // 2. Validate options
+    if (!optA || !optB || !optC || !optD) {
+      rowErrors.push('All 4 options (option_a, option_b, option_c, option_d) must be non-empty.')
+    }
+
+    // 3. Validate correct_option_index (0-3 or A-D)
+    let correctIndex = -1
+    const cleanCorrect = (rawCorrect !== undefined && rawCorrect !== null ? rawCorrect : '').toString().trim().toUpperCase()
+    if (cleanCorrect === '0' || cleanCorrect === 'A') correctIndex = 0
+    else if (cleanCorrect === '1' || cleanCorrect === 'B') correctIndex = 1
+    else if (cleanCorrect === '2' || cleanCorrect === 'C') correctIndex = 2
+    else if (cleanCorrect === '3' || cleanCorrect === 'D') correctIndex = 3
+    else {
+      rowErrors.push(`Invalid correct_option_index "${rawCorrect}". Must be 0, 1, 2, or 3 (or A, B, C, D).`)
+    }
+
+    // 4. Validate difficulty (easy, medium, hard)
+    let diff = (rawDiff || '').toString().trim().toLowerCase()
+    if (!diff) {
+      diff = 'medium'
+    } else if (!['easy', 'medium', 'hard'].includes(diff)) {
+      rowErrors.push(`Invalid difficulty "${rawDiff}". Must be easy, medium, or hard.`)
+    }
+
+    // 5. Validate marks (positive integer)
+    let marks = 1
+    if (rawMarks !== undefined && rawMarks !== '') {
+      const parsedMarks = parseInt(rawMarks, 10)
+      if (isNaN(parsedMarks) || parsedMarks <= 0) {
+        rowErrors.push(`Invalid marks "${rawMarks}". Must be a positive integer.`)
+      } else {
+        marks = parsedMarks
+      }
+    }
+
+    // 6. Resolve subject
+    let resolvedSubjectId = fallbackSubjectId || null
+    let resolvedSubjectName = ''
+    if (rawSubject && rawSubject.trim()) {
+      const subTrim = rawSubject.trim().toLowerCase()
+      const matched = (subjectsList || []).find(
+        (s) => s.name?.toLowerCase() === subTrim || s.code?.toLowerCase() === subTrim
+      )
+      if (matched) {
+        resolvedSubjectId = matched.id
+        resolvedSubjectName = matched.name
+      }
+    }
+
+    if (!resolvedSubjectName && resolvedSubjectId) {
+      const fallbackSub = (subjectsList || []).find((s) => s.id === resolvedSubjectId)
+      if (fallbackSub) resolvedSubjectName = fallbackSub.name
+    }
+
+    if (!resolvedSubjectId) {
+      rowErrors.push(`Could not resolve subject "${rawSubject || 'empty'}". Please select a fallback subject in the dropdown.`)
+    }
+
+    // 7. Duplicate detection
+    const norm = (questionText || '').toLowerCase().trim()
+    let isDuplicate = false
+    let duplicateReason = ''
+    if (norm) {
+      if (seenInCsv.has(norm)) {
+        isDuplicate = true
+        duplicateReason = 'Duplicate question within this CSV file'
+        duplicateCount++
+      } else if (existingSet.has(norm)) {
+        isDuplicate = true
+        duplicateReason = 'Question already exists in Question Bank'
+        duplicateCount++
+      }
+      seenInCsv.add(norm)
+    }
+
+    const hasError = rowErrors.length > 0
+    if (hasError) {
+      errorCount++
+      allErrors.push({ row: rowNum, text: questionText || `Row ${rowNum}`, errors: rowErrors })
+    } else {
+      validCount++
+    }
+
+    parsedItems.push({
+      rowNumber: rowNum,
+      question_text: (questionText || '').trim(),
+      options: [optA || '', optB || '', optC || '', optD || ''],
+      correct_option_index: correctIndex,
+      explanation: (rawExplanation || '').trim(),
+      marks,
+      difficulty: diff,
+      topic: (rawTopic || '').trim(),
+      subject_name: resolvedSubjectName || rawSubject || '',
+      resolvedSubjectId,
+      code_snippet: (rawCodeSnippet || '').trim() || null,
+      hasError,
+      errors: rowErrors,
+      isDuplicate,
+      duplicateReason,
+    })
+  }
+
+  return {
+    rows: parsedItems,
+    errors: allErrors,
+    validCount,
+    errorCount,
+    duplicateCount,
+  }
+}
+
 export default function QuestionBank() {
   const [questions, setQuestions] = useState([])
   const [subjects, setSubjects] = useState([])
@@ -23,6 +267,19 @@ export default function QuestionBank() {
   // Delete Confirmation
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [deleting, setDeleting] = useState(false)
+
+  // Bulk CSV Import States
+  const [isCsvModalOpen, setIsCsvModalOpen] = useState(false)
+  const [csvFile, setCsvFile] = useState(null)
+  const [csvText, setCsvText] = useState('')
+  const [csvDefaultSubject, setCsvDefaultSubject] = useState('')
+  const [csvSelectedQuiz, setCsvSelectedQuiz] = useState('')
+  const [skipDuplicates, setSkipDuplicates] = useState(true)
+  const [csvValidationResult, setCsvValidationResult] = useState(null)
+  const [csvImporting, setCsvImporting] = useState(false)
+  const [csvImportProgress, setCsvImportProgress] = useState({ current: 0, total: 0, currentText: '' })
+  const [csvImportResults, setCsvImportResults] = useState(null)
+  const [csvViewTab, setCsvViewTab] = useState('preview') // 'preview' | 'errors'
 
   // Form data
   const [form, setForm] = useState({
@@ -52,7 +309,10 @@ export default function QuestionBank() {
           .from('subjects')
           .select('id, name, code')
           .order('name')
-        if (!ignore) setSubjects(subData || [])
+        if (!ignore) {
+          setSubjects(subData || [])
+          setCsvDefaultSubject((prev) => prev || (subData && subData.length > 0 ? subData[0].id : ''))
+        }
 
         // Quizzes (for assignment)
         const { data: quizData } = await supabase
@@ -61,8 +321,9 @@ export default function QuestionBank() {
           .order('title')
         if (!ignore) setQuizzes(quizData || [])
 
-        // Questions — admin sees all (resilient to schema with or without direct subject_id relationship)
-        let loadedQuestions = []
+        // Questions — fetch scalar columns only.
+        // Avoid embedding quizzes here because questions may have multiple
+        // foreign-key paths to quizzes (direct quiz_id and quiz_questions).
         const { data: qData, error: qErr } = await supabase
           .from('questions')
           .select(`
@@ -77,48 +338,23 @@ export default function QuestionBank() {
             difficulty,
             topic,
             order_index,
-            created_at,
-            subjects ( id, name, code ),
-            quizzes ( id, title )
+            created_at
           `)
           .order('created_at', { ascending: false })
 
-        if (!qErr) {
-          loadedQuestions = qData || []
-        } else {
-          // Fallback linking via quizzes -> subjects
-          const { data: qBase, error: qBaseErr } = await supabase
-            .from('questions')
-            .select(`
-              id,
-              quiz_id,
-              question_text,
-              question_type,
-              code_snippet,
-              options,
-              marks,
-              order_index,
-              created_at,
-              quizzes (
-                id,
-                title,
-                subjects (
-                  id,
-                  name,
-                  code
-                )
-              )
-            `)
-            .order('created_at', { ascending: false })
+        if (qErr) throw new Error(qErr.message)
 
-          if (qBaseErr) throw new Error(qBaseErr.message)
-          loadedQuestions = (qBase || []).map((q) => ({
-            ...q,
-            difficulty: q.difficulty || 'medium',
-            topic: q.topic || '',
-            subjects: q.quizzes?.subjects || null,
-          }))
-        }
+        // Resolve labels locally using the subjects and quizzes already fetched.
+        const subjectById = new Map((subData || []).map((subject) => [subject.id, subject]))
+        const quizById = new Map((quizData || []).map((quiz) => [quiz.id, quiz]))
+
+        const loadedQuestions = (qData || []).map((question) => ({
+          ...question,
+          difficulty: question.difficulty || 'medium',
+          topic: question.topic || '',
+          subjects: subjectById.get(question.subject_id) || null,
+          quizzes: quizById.get(question.quiz_id) || null,
+        }))
 
         if (!ignore) setQuestions(loadedQuestions)
       } catch (err) {
@@ -402,6 +638,146 @@ export default function QuestionBank() {
     }
   }
 
+  // Open CSV Import Modal
+  const handleOpenCsvModal = () => {
+    setIsCsvModalOpen(true)
+    setCsvFile(null)
+    setCsvText('')
+    setCsvValidationResult(null)
+    setCsvImportResults(null)
+    setCsvImporting(false)
+    setCsvViewTab('preview')
+    if (subjects.length > 0 && !csvDefaultSubject) {
+      setCsvDefaultSubject(subjects[0].id)
+    }
+  }
+
+  // Close CSV Import Modal
+  const handleCloseCsvModal = () => {
+    if (csvImporting) return
+    setIsCsvModalOpen(false)
+  }
+
+  // Download Sample CSV Template
+  const handleDownloadTemplate = () => {
+    const templateContent = `question_text,option_a,option_b,option_c,option_d,correct_option_index,explanation,marks,difficulty,topic,subject_name
+"What is the average time complexity of searching in a balanced Binary Search Tree?","O(1)","O(log n)","O(n)","O(n log n)",1,"In a balanced BST, tree height is O(log n), so search takes O(log n) time.",1,easy,"Binary Search Trees","Data Structures and Algorithms"
+"What is the output of the following C++ code?","5","6","Undefined Behavior","Compilation Error",0,"The pointer ptr holds the address of x. Dereferencing *ptr yields value 5.",2,medium,"Pointers","C++"
+"Which of the following database isolation levels prevents phantom reads?","Read Uncommitted","Read Committed","Repeatable Read","Serializable",3,"Serializable isolation provides the highest level of isolation and prevents phantom reads.",1,hard,"Transactions & ACID","DBMS"
+`
+    const blob = new Blob([templateContent], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', 'brainvash_questions_template.csv')
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+
+  // Handle CSV file selection
+  const handleCsvFileChange = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setCsvFile(file)
+    setCsvImportResults(null)
+    const reader = new FileReader()
+    reader.onload = (event) => {
+      const content = event.target?.result || ''
+      setCsvText(content)
+      const res = validateAndParseCsvQuestions(content, csvDefaultSubject, subjects, questions)
+      setCsvValidationResult(res)
+      setCsvViewTab(res.errorCount > 0 && res.validCount === 0 ? 'errors' : 'preview')
+    }
+    reader.readAsText(file)
+  }
+
+  // Handle fallback subject change
+  const handleFallbackSubjectChange = (newSubId) => {
+    setCsvDefaultSubject(newSubId)
+    if (csvText) {
+      const res = validateAndParseCsvQuestions(csvText, newSubId, subjects, questions)
+      setCsvValidationResult(res)
+    }
+  }
+
+  // Execute sequential import via admin_save_question RPC
+  const handleExecuteCsvImport = async () => {
+    if (!csvValidationResult || csvValidationResult.validCount === 0) return
+    const candidateRows = csvValidationResult.rows.filter(
+      (r) => !r.hasError && (!skipDuplicates || !r.isDuplicate)
+    )
+
+    if (candidateRows.length === 0) {
+      setError('No eligible questions to import (all rows have validation errors or are duplicates).')
+      return
+    }
+
+    setCsvImporting(true)
+    setCsvImportResults(null)
+    setError('')
+    setSuccessMsg('')
+
+    let successCount = 0
+    const failedRows = []
+
+    for (let i = 0; i < candidateRows.length; i++) {
+      const item = candidateRows[i]
+      setCsvImportProgress({
+        current: i + 1,
+        total: candidateRows.length,
+        currentText: item.question_text.slice(0, 60),
+      })
+
+      try {
+        const { error: rpcErr } = await supabase.rpc('admin_save_question', {
+          p_question_id: null,
+          p_quiz_id: csvSelectedQuiz || null,
+          p_subject_id: item.resolvedSubjectId || csvDefaultSubject || null,
+          p_topic: item.topic || null,
+          p_difficulty: item.difficulty || 'medium',
+          p_question_text: item.question_text.trim(),
+          p_code_snippet: item.code_snippet || null,
+          p_options: item.options,
+          p_marks: Number(item.marks) || 1,
+          p_correct_option_index: Number(item.correct_option_index),
+          p_explanation: item.explanation || null,
+        })
+
+        if (rpcErr) {
+          failedRows.push({
+            rowNumber: item.rowNumber,
+            question_text: item.question_text,
+            error: rpcErr.message || 'RPC execution rejected',
+          })
+        } else {
+          successCount++
+        }
+      } catch (err) {
+        failedRows.push({
+          rowNumber: item.rowNumber,
+          question_text: item.question_text,
+          error: err.message || 'Client / network error',
+        })
+      }
+    }
+
+    setCsvImporting(false)
+    setCsvImportResults({
+      successCount,
+      failedCount: failedRows.length,
+      failedRows,
+    })
+
+    if (successCount > 0) {
+      setSuccessMsg(`Successfully imported ${successCount} question(s) via secure RPC.${failedRows.length > 0 ? ` (${failedRows.length} failed)` : ''}`)
+      setRefreshTrigger((prev) => prev + 1)
+    } else if (failedRows.length > 0) {
+      setError(`Import failed: All ${failedRows.length} attempted question(s) were rejected. See details below.`)
+    }
+  }
+
   // Update an option value
   const updateOption = (idx, value) => {
     setForm((prev) => {
@@ -427,9 +803,14 @@ export default function QuestionBank() {
             Author, categorize and assign MCQ items across Easy, Medium and Hard difficulty tiers. Questions are shared via the quiz_questions junction table.
           </p>
         </div>
-        <button className="btn-primary" onClick={handleOpenCreate}>
-          <span>➕</span> New Question
-        </button>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-secondary" onClick={handleOpenCsvModal}>
+            <span>📥</span> Import Questions (CSV)
+          </button>
+          <button className="btn-primary" onClick={handleOpenCreate}>
+            <span>➕</span> New Question
+          </button>
+        </div>
       </div>
 
       {/* Difficulty Distribution Cards */}
@@ -784,6 +1165,326 @@ export default function QuestionBank() {
               <button type="button" className="btn-secondary" onClick={() => setDeleteConfirm(null)}>Cancel</button>
               <button type="button" className="btn-primary" style={{ background: '#c2185b', borderColor: '#c2185b' }} disabled={deleting} onClick={handleDelete}>
                 {deleting ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk CSV Import Modal */}
+      {isCsvModalOpen && (
+        <div className="auth-modal-overlay" onClick={handleCloseCsvModal}>
+          <div
+            className="auth-modal-card"
+            onClick={(e) => e.stopPropagation()}
+            style={{ maxWidth: 880, maxHeight: '90vh', overflowY: 'auto', display: 'flex', flexDirection: 'column' }}
+          >
+            <button className="auth-modal-close" onClick={handleCloseCsvModal} disabled={csvImporting}>×</button>
+
+            <div className="diff-modal-header" style={{ marginBottom: 16 }}>
+              <div className="diff-header-badge" style={{ background: '#eef2ff', color: '#3730a3' }}>
+                <span>📥</span> Bulk Question Import
+              </div>
+              <h2 className="diff-modal-title">Import Questions (CSV)</h2>
+              <p style={{ margin: '4px 0 0', fontSize: '0.85rem', color: '#5e4a52' }}>
+                Batch author questions using a structured CSV file. All questions and answer keys are saved via secure RPC.
+              </p>
+            </div>
+
+            {/* Subject and Quiz Selection */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 16, background: '#fbf8f5', padding: 14, borderRadius: 10, border: '1px solid #f3e0d5' }}>
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                  Fallback / Default Subject *
+                </label>
+                <select
+                  className="form-input"
+                  style={{ fontSize: '0.85rem' }}
+                  value={csvDefaultSubject}
+                  onChange={(e) => handleFallbackSubjectChange(e.target.value)}
+                  disabled={csvImporting}
+                >
+                  <option value="">— Select Fallback Subject —</option>
+                  {subjects.map((sub) => (
+                    <option key={sub.id} value={sub.id}>
+                      {sub.name} {sub.code ? `(${sub.code})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <span style={{ fontSize: '0.75rem', color: '#7a6a70', display: 'block', marginTop: 4 }}>
+                  Used when subject_name is empty or doesn't match a curriculum subject.
+                </span>
+              </div>
+
+              <div className="form-group" style={{ margin: 0 }}>
+                <label className="form-label" style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                  Assign to Quiz (Optional)
+                </label>
+                <select
+                  className="form-input"
+                  style={{ fontSize: '0.85rem' }}
+                  value={csvSelectedQuiz}
+                  onChange={(e) => setCsvSelectedQuiz(e.target.value)}
+                  disabled={csvImporting}
+                >
+                  <option value="">— Standalone (Bank Only, quiz_id = null) —</option>
+                  {quizzes.map((qz) => (
+                    <option key={qz.id} value={qz.id}>
+                      {qz.title}
+                    </option>
+                  ))}
+                </select>
+                <span style={{ fontSize: '0.75rem', color: '#7a6a70', display: 'block', marginTop: 4 }}>
+                  If selected, questions are linked directly to this quiz.
+                </span>
+              </div>
+            </div>
+
+            {/* Upload Area & Template Button */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.85rem', color: '#3b1f2b', fontWeight: 600 }}>
+                  <input
+                    type="checkbox"
+                    checked={skipDuplicates}
+                    onChange={(e) => setSkipDuplicates(e.target.checked)}
+                    disabled={csvImporting}
+                  />
+                  Skip duplicate questions (Recommended)
+                </label>
+              </div>
+
+              <button
+                type="button"
+                className="btn-secondary"
+                style={{ fontSize: '0.82rem', padding: '6px 12px' }}
+                onClick={handleDownloadTemplate}
+              >
+                📄 Download CSV Template
+              </button>
+            </div>
+
+            {/* File Drop/Input Area */}
+            <div style={{
+              border: '2px dashed #f3e0d5',
+              borderRadius: 10,
+              padding: '16px 20px',
+              textAlign: 'center',
+              background: '#ffffff',
+              marginBottom: 16,
+            }}>
+              <input
+                type="file"
+                id="csvFileInput"
+                accept=".csv,text/csv"
+                style={{ display: 'none' }}
+                onChange={handleCsvFileChange}
+                disabled={csvImporting}
+              />
+              <label htmlFor="csvFileInput" style={{ cursor: 'pointer', display: 'block' }}>
+                <div style={{ fontSize: '1.8rem', marginBottom: 4 }}>📁</div>
+                <span style={{ color: '#e8634a', fontWeight: 600, fontSize: '0.92rem' }}>
+                  {csvFile ? `Selected: ${csvFile.name}` : 'Click here to choose a CSV file'}
+                </span>
+                <span style={{ display: 'block', fontSize: '0.78rem', color: '#7a6a70', marginTop: 4 }}>
+                  Expected columns: question_text, option_a, option_b, option_c, option_d, correct_option_index, explanation, marks, difficulty, topic, subject_name
+                </span>
+              </label>
+            </div>
+
+            {/* Parsing & Validation Summary */}
+            {csvValidationResult && (
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 12 }}>
+                  <span style={{ padding: '4px 10px', background: '#f5f5f5', borderRadius: 999, fontSize: '0.82rem', fontWeight: 600, color: '#3b1f2b' }}>
+                    Total Rows: {csvValidationResult.rows.length}
+                  </span>
+                  <span style={{ padding: '4px 10px', background: '#e8f5e9', borderRadius: 999, fontSize: '0.82rem', fontWeight: 600, color: '#2e7d32' }}>
+                    ✓ Ready: {csvValidationResult.validCount}
+                  </span>
+                  {csvValidationResult.errorCount > 0 && (
+                    <span style={{ padding: '4px 10px', background: '#fce4ec', borderRadius: 999, fontSize: '0.82rem', fontWeight: 600, color: '#c2185b' }}>
+                      ⚠️ Errors: {csvValidationResult.errorCount}
+                    </span>
+                  )}
+                  {csvValidationResult.duplicateCount > 0 && (
+                    <span style={{ padding: '4px 10px', background: '#fff8e1', borderRadius: 999, fontSize: '0.82rem', fontWeight: 600, color: '#f57f17' }}>
+                      🔁 Duplicates: {csvValidationResult.duplicateCount}
+                    </span>
+                  )}
+
+                  <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`dash-cat-pill ${csvViewTab === 'preview' ? 'active' : ''}`}
+                      style={{ fontSize: '0.78rem', padding: '4px 10px' }}
+                      onClick={() => setCsvViewTab('preview')}
+                    >
+                      Preview Rows ({csvValidationResult.rows.length})
+                    </button>
+                    {csvValidationResult.errorCount > 0 && (
+                      <button
+                        type="button"
+                        className={`dash-cat-pill ${csvViewTab === 'errors' ? 'active' : ''}`}
+                        style={{ fontSize: '0.78rem', padding: '4px 10px', color: '#c2185b' }}
+                        onClick={() => setCsvViewTab('errors')}
+                      >
+                        Errors ({csvValidationResult.errorCount})
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Validation Errors Tab */}
+                {csvViewTab === 'errors' && csvValidationResult.errorCount > 0 && (
+                  <div style={{ maxHeight: 220, overflowY: 'auto', background: '#fff5f5', border: '1px solid #ffcdd2', borderRadius: 8, padding: 12 }}>
+                    <h4 style={{ margin: '0 0 8px', fontSize: '0.85rem', color: '#c2185b' }}>Validation Issues Found:</h4>
+                    {csvValidationResult.errors.map((errItem, idx) => (
+                      <div key={idx} style={{ fontSize: '0.82rem', color: '#3b1f2b', marginBottom: 6, paddingBottom: 6, borderBottom: '1px solid #ffebee' }}>
+                        <strong>Row {errItem.row}:</strong> <span style={{ color: '#5e4a52' }}>"{errItem.text?.slice(0, 60)}..."</span>
+                        <ul style={{ margin: '3px 0 0 16px', padding: 0, color: '#c2185b' }}>
+                          {errItem.errors.map((msg, mi) => (
+                            <li key={mi}>{msg}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Preview Table Tab */}
+                {csvViewTab === 'preview' && (
+                  <div style={{ maxHeight: 240, overflowY: 'auto', border: '1px solid #f3e0d5', borderRadius: 8 }}>
+                    <table className="dash-table" style={{ fontSize: '0.8rem', margin: 0 }}>
+                      <thead>
+                        <tr>
+                          <th style={{ width: 40 }}>#</th>
+                          <th>Question</th>
+                          <th>Options (A, B, C, D)</th>
+                          <th>Correct</th>
+                          <th>Diff</th>
+                          <th>Marks</th>
+                          <th>Subject</th>
+                          <th>Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {csvValidationResult.rows.map((row) => (
+                          <tr key={row.rowNumber} style={{ opacity: row.hasError || (skipDuplicates && row.isDuplicate) ? 0.65 : 1 }}>
+                            <td>{row.rowNumber}</td>
+                            <td style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.question_text}>
+                              {row.question_text || <span style={{ color: '#c2185b', fontStyle: 'italic' }}>Missing</span>}
+                            </td>
+                            <td style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              A: {row.options[0]}, B: {row.options[1]}, C: {row.options[2]}, D: {row.options[3]}
+                            </td>
+                            <td>
+                              <span style={{ fontWeight: 700, color: row.correct_option_index >= 0 ? '#2e7d32' : '#c2185b' }}>
+                                {row.correct_option_index >= 0 ? `${row.correct_option_index} (${String.fromCharCode(65 + row.correct_option_index)})` : 'Invalid'}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`dash-quiz-diff diff-${row.difficulty}`} style={{ fontSize: '0.72rem', padding: '2px 6px' }}>
+                                {row.difficulty}
+                              </span>
+                            </td>
+                            <td>{row.marks}</td>
+                            <td style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {row.subject_name || <span style={{ color: '#c2185b' }}>None</span>}
+                            </td>
+                            <td>
+                              {row.hasError ? (
+                                <span style={{ color: '#c2185b', fontWeight: 600, fontSize: '0.75rem' }}>❌ Error</span>
+                              ) : row.isDuplicate ? (
+                                <span style={{ color: '#f57f17', fontWeight: 600, fontSize: '0.75rem' }} title={row.duplicateReason}>
+                                  🔁 {skipDuplicates ? 'Skipped' : 'Duplicate'}
+                                </span>
+                              ) : (
+                                <span style={{ color: '#2e7d32', fontWeight: 600, fontSize: '0.75rem' }}>✓ Valid</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Progress Bar during sequential import */}
+            {csvImporting && (
+              <div style={{ margin: '14px 0', padding: 14, background: '#fbf8f5', borderRadius: 8, border: '1px solid #f3e0d5' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', fontWeight: 600, color: '#3b1f2b' }}>
+                  <span>Importing sequentially via RPC...</span>
+                  <span>{csvImportProgress.current} / {csvImportProgress.total}</span>
+                </div>
+                <div style={{ background: '#f3e0d5', borderRadius: 999, height: 8, overflow: 'hidden', margin: '8px 0 6px' }}>
+                  <div
+                    style={{
+                      background: 'linear-gradient(90deg, #e8634a, #d84315)',
+                      height: '100%',
+                      width: `${csvImportProgress.total > 0 ? (csvImportProgress.current / csvImportProgress.total) * 100 : 0}%`,
+                      transition: 'width 0.2s ease',
+                    }}
+                  />
+                </div>
+                <span style={{ fontSize: '0.78rem', color: '#7a6a70', display: 'block', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  Current: {csvImportProgress.currentText}
+                </span>
+              </div>
+            )}
+
+            {/* Results Summary after Import */}
+            {csvImportResults && (
+              <div style={{ margin: '12px 0', padding: 14, background: '#fbf8f5', borderRadius: 8, border: '1px solid #f3e0d5' }}>
+                <h4 style={{ margin: '0 0 6px', fontSize: '0.9rem', color: '#2e7d32' }}>
+                  ✓ Import Completed: {csvImportResults.successCount} saved successfully
+                </h4>
+                {csvImportResults.failedCount > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: '#c2185b' }}>
+                      ⚠️ {csvImportResults.failedCount} question(s) failed to save:
+                    </span>
+                    <div style={{ maxHeight: 150, overflowY: 'auto', marginTop: 6 }}>
+                      {csvImportResults.failedRows.map((fail, idx) => (
+                        <div key={idx} style={{ fontSize: '0.8rem', color: '#c2185b', marginBottom: 4 }}>
+                          • Row {fail.rowNumber}: "{fail.question_text?.slice(0, 50)}..." — <em>{fail.error}</em>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Modal Actions */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 16 }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={csvImporting}
+                onClick={handleCloseCsvModal}
+              >
+                {csvImportResults ? 'Close' : 'Cancel'}
+              </button>
+
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={
+                  csvImporting ||
+                  !csvValidationResult ||
+                  csvValidationResult.rows.filter((r) => !r.hasError && (!skipDuplicates || !r.isDuplicate)).length === 0
+                }
+                onClick={handleExecuteCsvImport}
+              >
+                {csvImporting
+                  ? `Importing (${csvImportProgress.current}/${csvImportProgress.total})...`
+                  : `Import ${csvValidationResult
+                    ? csvValidationResult.rows.filter((r) => !r.hasError && (!skipDuplicates || !r.isDuplicate)).length
+                    : 0
+                  } Questions`}
               </button>
             </div>
           </div>

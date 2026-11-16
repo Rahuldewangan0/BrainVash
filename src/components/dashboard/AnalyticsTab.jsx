@@ -1,7 +1,64 @@
 export default function AnalyticsTab({
   stats,
+  attempts = [],
   onNavigateTab,
 }) {
+  const completedAttempts = attempts
+    .filter((attempt) => attempt.status === 'completed')
+    .sort((a, b) => {
+      const dateA = new Date(a.completed_at || a.started_at || 0).getTime()
+      const dateB = new Date(b.completed_at || b.started_at || 0).getTime()
+      return dateA - dateB
+    })
+
+  const recentAttempts = completedAttempts.slice(-7)
+  const trendValues = recentAttempts.map((attempt) => {
+    const totalMarks = Number(attempt.total_marks || 0)
+    const score = Number(attempt.score || 0)
+    const scorePercentage =
+      totalMarks > 0 ? Math.round((score / totalMarks) * 100) : 0
+
+    return {
+      id: attempt.id,
+      title: attempt.quizzes?.title || 'Quiz',
+      subject: attempt.quizzes?.subjects?.name || 'General',
+      date: attempt.completed_at || attempt.started_at,
+      score: scorePercentage,
+      rawScore: score,
+      totalMarks,
+    }
+  })
+
+  const averageRecentScore =
+    trendValues.length > 0
+      ? Math.round(
+        trendValues.reduce((total, item) => total + item.score, 0) /
+        trendValues.length
+      )
+      : 0
+
+  const firstScore = trendValues[0]?.score
+  const lastScore = trendValues[trendValues.length - 1]?.score
+  const trendDifference =
+    trendValues.length > 1 ? lastScore - firstScore : null
+
+  const formatDate = (value) => {
+    if (!value) return '—'
+    const date = new Date(value)
+    if (Number.isNaN(date.getTime())) return '—'
+    return date.toLocaleDateString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+    })
+  }
+
+  const getTrendLabel = () => {
+    if (trendDifference === null) return 'Complete more quizzes to see your trend'
+    if (trendDifference > 0) return `Up ${trendDifference} percentage points`
+    if (trendDifference < 0) return `Down ${Math.abs(trendDifference)} percentage points`
+    return 'Your first and latest scores are level'
+  }
+
   return (
     <div className="dash-tab-container">
       <div className="dash-tab-header">
@@ -47,7 +104,9 @@ export default function AnalyticsTab({
               {stats.strongestSubject?.name || 'N/A'}
             </span>
             <span className="dash-stat-note">
-              {stats.strongestSubject ? `${stats.strongestSubject.accuracy}% accuracy` : 'Take quizzes to identify'}
+              {stats.strongestSubject
+                ? `${stats.strongestSubject.accuracy}% accuracy`
+                : 'Take quizzes to identify'}
             </span>
           </div>
         </div>
@@ -62,10 +121,117 @@ export default function AnalyticsTab({
               {stats.weakestSubject?.name || 'N/A'}
             </span>
             <span className="dash-stat-note">
-              {stats.weakestSubject ? `${stats.weakestSubject.accuracy}% accuracy` : 'Take quizzes to identify'}
+              {stats.weakestSubject
+                ? `${stats.weakestSubject.accuracy}% accuracy`
+                : 'Take quizzes to identify'}
             </span>
           </div>
         </div>
+      </div>
+
+      {/* Recent Performance Trend */}
+      <div className="dash-card" style={{ marginBottom: 24 }}>
+        <div className="dash-card-header">
+          <div>
+            <h2 className="dash-card-title">Recent Performance Trend</h2>
+            <p className="dash-card-subtitle">
+              Score percentage across your last 7 completed quiz attempts
+            </p>
+          </div>
+        </div>
+
+        {trendValues.length > 0 ? (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                alignItems: 'center',
+                gap: 24,
+                margin: '18px 0 22px',
+              }}
+            >
+              <div>
+                <div style={{ color: '#8c7b80', fontSize: 12, marginBottom: 4 }}>
+                  Recent average score
+                </div>
+                <div style={{ color: '#38232f', fontSize: 28, fontWeight: 700 }}>
+                  {averageRecentScore}%
+                </div>
+              </div>
+              <div>
+                <div style={{ color: '#8c7b80', fontSize: 12, marginBottom: 4 }}>
+                  Trend (first to latest)
+                </div>
+                <div style={{ color: '#38232f', fontSize: 15, fontWeight: 600 }}>
+                  {getTrendLabel()}
+                </div>
+              </div>
+            </div>
+
+            <div
+              role="img"
+              aria-label={`Recent quiz score trend: ${trendValues
+                .map((item) => `${item.title} ${item.score}%`)
+                .join(', ')}`}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${Math.max(trendValues.length, 1)}, minmax(0, 1fr))`,
+                alignItems: 'end',
+                gap: 12,
+                minHeight: 190,
+                padding: '12px 4px 0',
+                borderBottom: '1px solid #eadfe1',
+              }}
+            >
+              {trendValues.map((item, index) => {
+                const barHeight = Math.max(8, Math.min(100, item.score))
+                return (
+                  <div
+                    key={item.id}
+                    title={`${item.title}: ${item.score}%`}
+                    style={{
+                      minWidth: 0,
+                      height: '180px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center',
+                      justifyContent: 'flex-end',
+                      gap: 7,
+                    }}
+                  >
+                    <span style={{ color: '#5d4652', fontSize: 12, fontWeight: 700 }}>
+                      {item.score}%
+                    </span>
+                    <div
+                      style={{
+                        width: 'min(100%, 44px)',
+                        height: `${barHeight}%`,
+                        minHeight: 8,
+                        borderRadius: '7px 7px 0 0',
+                        background: index === trendValues.length - 1 ? '#e8634a' : '#d9a18f',
+                        transition: 'height 180ms ease',
+                      }}
+                    />
+                    <span style={{ color: '#8c7b80', fontSize: 11 }}>
+                      {formatDate(item.date)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            <p style={{ color: '#8c7b80', fontSize: 12, marginTop: 12 }}>
+              Bars are ordered from oldest to latest. Scores are calculated from marks earned ÷ total marks.
+            </p>
+          </>
+        ) : (
+          <div className="dash-empty-state-mini" style={{ margin: '18px 0' }}>
+            <p>Complete a quiz to start building your performance trend.</p>
+            <button className="btn-primary" onClick={() => onNavigateTab('quizzes')}>
+              Explore Quizzes →
+            </button>
+          </div>
+        )}
       </div>
 
       {stats.subjectBreakdown.length > 0 ? (
@@ -97,8 +263,8 @@ export default function AnalyticsTab({
                           sub.accuracy >= 75
                             ? '#48bb78'
                             : sub.accuracy >= 50
-                            ? '#f5945e'
-                            : '#e8634a',
+                              ? '#f5945e'
+                              : '#e8634a',
                       }}
                     />
                   </div>
@@ -107,7 +273,7 @@ export default function AnalyticsTab({
             </div>
           </div>
 
-          {/* Breakdown Table & Recommendations */}
+          {/* Breakdown Table */}
           <div className="dash-card">
             <div className="dash-card-header">
               <div>
@@ -134,9 +300,8 @@ export default function AnalyticsTab({
                       <td>{sub.totalScored} pts</td>
                       <td>
                         <span
-                          className={`dash-table-accuracy acc-${
-                            sub.accuracy >= 70 ? 'high' : sub.accuracy >= 50 ? 'med' : 'low'
-                          }`}
+                          className={`dash-table-accuracy acc-${sub.accuracy >= 70 ? 'high' : sub.accuracy >= 50 ? 'med' : 'low'
+                            }`}
                         >
                           {sub.accuracy}%
                         </span>

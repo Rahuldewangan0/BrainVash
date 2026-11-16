@@ -132,7 +132,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_quiz_attempts_active_unique
 -- 6. IMMUTABILITY TRIGGER ON QUIZ ATTEMPTS
 -- Protects selected_difficulty, quiz_id, user_id, started_at and result fields from student tampering.
 -- Uses NULL-safe IS DISTINCT FROM comparisons.
--- Trusted server-side grading procedures set transaction-local 'brainvash.grading_in_progress' to authorize result finalization.
+-- Trusted server-side grading procedures use transaction-local 'app.trusted_grading_token' for result finalization.
 CREATE OR REPLACE FUNCTION public.guard_quiz_attempt_update()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -501,8 +501,9 @@ PERFORM set_config('app.trusted_grading_token', '', true);
         v_accuracy := ROUND((v_correct_answers_count::NUMERIC / v_submitted_question_count::NUMERIC) * 100.0, 2);
     END IF;
 
-    -- 10. Update attempt record (Authorize attempt finalization within this local transaction)
-    PERFORM set_config('brainvash.grading_in_progress', 'true', true);
+    -- 10. Authorize trusted grading for both attempt and profile updates.
+    v_grading_token := encode(gen_random_bytes(16), 'hex');
+    PERFORM set_config('app.trusted_grading_token', v_grading_token, true);
 
     UPDATE public.quiz_attempts
     SET status = 'completed',
@@ -513,8 +514,6 @@ PERFORM set_config('app.trusted_grading_token', '', true);
         completed_at = NOW()
     WHERE id = p_attempt_id;
 
-    PERFORM set_config('brainvash.grading_in_progress', 'false', true);
-
     -- 11. Atomically increment student profile metrics
     UPDATE public.profiles
     SET total_score = total_score + ROUND(v_total_score)::INTEGER,
@@ -522,6 +521,9 @@ PERFORM set_config('app.trusted_grading_token', '', true);
         quizzes_attempted = quizzes_attempted + 1,
         updated_at = NOW()
     WHERE id = v_user_id;
+
+    -- Clear trusted grading only after both updates have completed.
+    PERFORM set_config('app.trusted_grading_token', '', true);
 
     RETURN jsonb_build_object(
         'attempt_id', p_attempt_id,
