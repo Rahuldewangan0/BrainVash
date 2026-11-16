@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { SpeedInsights } from '@vercel/speed-insights/react'
 import Navbar from './components/Navbar'
 import Hero from './components/Hero'
 import FeatureHighlights from './components/FeatureHighlights'
@@ -159,6 +160,8 @@ function App() {
             onClose={() => setPasswordRecoveryMode(false)}
           />
         )}
+
+        <SpeedInsights />
       </div>
     )
   }
@@ -183,6 +186,8 @@ function App() {
             onClose={() => setPasswordRecoveryMode(false)}
           />
         )}
+
+        <SpeedInsights />
       </div>
     )
   }
@@ -231,6 +236,8 @@ function App() {
           onClose={() => setPasswordRecoveryMode(false)}
         />
       )}
+
+      <SpeedInsights />
     </div>
   )
 }
