@@ -45,22 +45,19 @@ export default function DashboardSidebar({
       )}
 
       <aside className={`dash-sidebar ${mobileOpen ? 'open' : ''}`}>
-
         {/* Brand / Logo */}
         <div className="dash-sidebar-header">
           <div className="logo" onClick={onNavigateHome}>
             <img
-              src="/brainvash-new-logo.png"
-              alt="BrainVash"
-              className="h-9 w-auto object-contain"
+              src="/brainvash-logo-transparent.png"
+              alt="BrainVash logo"
+              className="logo-img"
             />
             <span className="logo-text">
               Brain<span>Vash</span>
             </span>
           </div>
-
           <span className="dash-portal-tag">Student</span>
-
           {setMobileOpen && (
             <button
               className="dash-sidebar-close"

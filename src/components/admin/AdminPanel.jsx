@@ -89,9 +89,9 @@ export default function AdminPanel({ onNavigateHome, onNavigateDashboard }) {
         <div className="dash-sidebar-header">
           <div className="logo" onClick={onNavigateHome} style={{ cursor: 'pointer' }}>
             <img
-              src="/brainvash-new-logo.png"
-              alt="BrainVash"
-              className="h-9 w-auto object-contain"
+              src="/brainvash-logo-transparent.png"
+              alt="BrainVash logo"
+              className="logo-img"
             />
             <span className="logo-text">
               Brain<span>Vash</span>

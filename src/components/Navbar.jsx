@@ -64,7 +64,7 @@ export default function Navbar({
           <div className="nav-left">
             <div className="logo" onClick={() => scrollTo('hero')}>
               <img
-                src="/brainvash-new-logo.png"
+                src="/brainvash-logo-transparent.png"
                 alt="BrainVash logo"
                 className="logo-img"
               />
